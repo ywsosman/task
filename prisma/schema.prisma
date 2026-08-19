@@ -1,0 +1,178 @@
+// Mini Inventory System - voucher based stock control.
+//
+// Master data : Groups, Units, Products, Warehouses
+// Documents   : StoreVoucherHeader + StoreVoucherDetails (Draft -> Posted)
+// Ledger      : StockMovement (signed qty, source of truth)
+// Cache       : StockBalance (qty per product per store, rebuildable from the ledger)
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Group {
+  id        Int       @id @default(autoincrement())
+  code      String    @unique @db.VarChar(20)
+  name      String    @db.VarChar(120)
+  createdAt DateTime  @default(now())
+  products  Product[]
+
+  @@map("Groups")
+}
+
+model Unit {
+  id        Int       @id @default(autoincrement())
+  code      String    @unique @db.VarChar(20)
+  name      String    @db.VarChar(120)
+  createdAt DateTime  @default(now())
+  products  Product[]
+
+  @@map("Units")
+}
+
+model Product {
+  id      Int    @id @default(autoincrement())
+  sku     String @unique @db.VarChar(60)
+  nameEn  String @db.VarChar(200)
+  nameAr  String @db.VarChar(200)
+  unitId  Int
+  groupId Int
+
+  /// Default cost suggested when creating an inbound voucher.
+  unitCost Decimal @default(0) @db.Decimal(18, 4)
+
+  /// Cached total across every store. Maintained when a voucher is posted.
+  onHandQty Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  unit  Unit  @relation(fields: [unitId], references: [id])
+  group Group @relation(fields: [groupId], references: [id])
+
+  voucherLines StoreVoucherDetail[]
+  balances     StockBalance[]
+  movements    StockMovement[]
+
+  @@index([groupId])
+  @@index([unitId])
+  @@map("Products")
+}
+
+model Warehouse {
+  id        Int      @id @default(autoincrement())
+  store     String   @unique @db.VarChar(20)
+  name      String   @db.VarChar(120)
+  createdAt DateTime @default(now())
+
+  vouchers  StoreVoucherHeader[]
+  balances  StockBalance[]
+  movements StockMovement[]
+
+  @@map("Warehouses")
+}
+
+enum VoucherStatus {
+  DRAFT
+  POSTED
+}
+
+/// Voucher head. TxNo carries the document number, e.g. SVI_0001 / SVO_0001.
+/// A draft has no effect on stock; posting is what writes the ledger.
+model StoreVoucherHeader {
+  txNo    String @id @db.VarChar(20)
+  storeId Int
+
+  /// 1 = IN (SVI), 2 = OUT (SVO). See VOUCHER_TYPE in src/lib/constants.ts
+  type Int
+
+  date   DateTime      @default(now())
+  status VoucherStatus @default(DRAFT)
+
+  /// Set on both legs of a transfer (e.g. SVT_0001) so they can be posted together.
+  transferRef String? @db.VarChar(20)
+
+  note       String?   @db.VarChar(500)
+  insertUid  String    @default("system") @db.VarChar(60)
+  insertDate DateTime  @default(now())
+  postedUid  String?   @db.VarChar(60)
+  postedDate DateTime?
+
+  store     Warehouse            @relation(fields: [storeId], references: [id])
+  details   StoreVoucherDetail[]
+  movements StockMovement[]
+
+  @@index([storeId])
+  @@index([status])
+  @@index([transferRef])
+  @@map("StoreVoucherHeader")
+}
+
+/// Voucher line. Qty is always positive; direction comes from the header type.
+model StoreVoucherDetail {
+  id        Int      @id @default(autoincrement())
+  txNo      String   @db.VarChar(20)
+  productId Int
+  qty       Int
+  unitCost  Decimal  @db.Decimal(18, 4)
+  lineTotal Decimal  @db.Decimal(18, 4)
+  trnsDate  DateTime @default(now())
+
+  header  StoreVoucherHeader @relation(fields: [txNo], references: [txNo], onDelete: Cascade)
+  product Product            @relation(fields: [productId], references: [id])
+
+  @@index([txNo])
+  @@index([productId])
+  @@map("StoreVoucherDetails")
+}
+
+/// Immutable ledger, written only when a voucher is posted.
+/// Qty is signed: positive for inbound, negative for outbound.
+model StockMovement {
+  txId      Int      @id @default(autoincrement())
+  ref       String   @db.VarChar(20)
+  productId Int
+  storeId   Int
+  qty       Int
+  cost      Decimal  @db.Decimal(18, 4)
+  createdAt DateTime @default(now())
+
+  header  StoreVoucherHeader @relation(fields: [ref], references: [txNo], onDelete: Cascade)
+  product Product            @relation(fields: [productId], references: [id])
+  store   Warehouse          @relation(fields: [storeId], references: [id])
+
+  @@index([productId, storeId])
+  @@index([ref])
+  @@map("StockMovement")
+}
+
+/// Derived balance per product per store. Equivalent to
+/// SUM(StockMovement.qty) GROUP BY productId, storeId, kept materialised so the
+/// row can be locked to keep stock from going negative under concurrency.
+model StockBalance {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  storeId   Int
+  qty       Int      @default(0)
+  avgCost   Decimal  @default(0) @db.Decimal(18, 4)
+  updatedAt DateTime @updatedAt
+
+  product Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  store   Warehouse @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, storeId])
+  @@index([storeId])
+  @@map("StockBalance")
+}
+
+/// Gapless document numbering. The row is locked inside the creating
+/// transaction, so numbers stay sequential per prefix (SVI, SVO, SVT).
+model NumberSequence {
+  prefix String @id @db.VarChar(10)
+  lastNo Int    @default(0)
+
+  @@map("NumberSequence")
+}
