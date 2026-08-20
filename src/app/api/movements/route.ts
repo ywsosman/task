@@ -1,7 +1,6 @@
 import { handleError, ok, toNumber } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
-/** The stock ledger. Qty is signed: positive inbound, negative outbound. */
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);

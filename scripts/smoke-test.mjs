@@ -1,12 +1,3 @@
-/**
- * End-to-end check of the stock engine against a running dev server.
- *
- * Usage: npm run dev, then `npm run smoke`
- *
- * The test creates its own product so it starts from a known zero balance and
- * can be re-run safely against a database that already holds data.
- */
-
 const BASE = process.env.BASE_URL ?? "http://localhost:3000";
 
 let passed = 0;
@@ -163,8 +154,6 @@ async function main() {
   const { payload: movements } = await api("GET", `/api/movements?productId=${product.id}`);
   check("ledger nets to 150", movements.reduce((sum, row) => sum + row.qty, 0), 150);
   check("outbound rows are negative", movements.some((row) => row.qty < 0), true);
-  // Two receipts, one issue and two transfer legs. The two failed postings
-  // wrote nothing, which is the rollback working.
   check("failed and draft vouchers wrote no rows", movements.length, 5);
 
   console.log(`\n${passed} passed, ${failed} failed`);

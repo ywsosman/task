@@ -12,10 +12,6 @@ const voucherInclude = {
   store: true,
 } satisfies Prisma.StoreVoucherHeaderInclude;
 
-/**
- * Creates a draft voucher. Drafts never touch stock; they only become real
- * when posted, which is what the Draft -> Posted workflow is for.
- */
 export async function createVoucher(input: CreateVoucherInput, actor: string = SYSTEM_USER) {
   return prisma.$transaction(async (tx) => {
     const store = await tx.warehouse.findUnique({ where: { id: input.storeId } });
@@ -41,11 +37,6 @@ export async function createVoucher(input: CreateVoucherInput, actor: string = S
   });
 }
 
-/**
- * Creates the two legs of a transfer as a single draft pair: an outbound
- * voucher on the source store and an inbound voucher on the destination,
- * joined by a shared transferRef so posting either one posts both.
- */
 export async function createTransfer(input: CreateTransferInput, actor: string = SYSTEM_USER) {
   return prisma.$transaction(async (tx) => {
     const [fromStore, toStore] = await Promise.all([
@@ -61,13 +52,7 @@ export async function createTransfer(input: CreateTransferInput, actor: string =
 
     const date = input.date ? new Date(input.date) : new Date();
     const note = input.note ?? `Transfer ${fromStore.name} -> ${toStore.name}`;
-
-    const outLines = await resolveLineCosts(
-      tx,
-      input.lines,
-      input.fromStoreId,
-      VOUCHER_TYPE.OUT,
-    );
+    const lines = await resolveLineCosts(tx, input.lines, input.fromStoreId, VOUCHER_TYPE.OUT);
 
     const outLeg = await tx.storeVoucherHeader.create({
       data: {
@@ -78,13 +63,11 @@ export async function createTransfer(input: CreateTransferInput, actor: string =
         note,
         transferRef,
         insertUid: actor,
-        details: { create: outLines },
+        details: { create: lines },
       },
       include: voucherInclude,
     });
 
-    // The inbound leg mirrors the outbound quantities. Its cost is provisional;
-    // posting overwrites it with the cost the goods actually left the source at.
     const inLeg = await tx.storeVoucherHeader.create({
       data: {
         txNo: inTxNo,
@@ -94,7 +77,7 @@ export async function createTransfer(input: CreateTransferInput, actor: string =
         note,
         transferRef,
         insertUid: actor,
-        details: { create: outLines },
+        details: { create: lines },
       },
       include: voucherInclude,
     });
@@ -113,7 +96,6 @@ export async function deleteDraftVoucher(txNo: string) {
   }
 
   if (header.transferRef) {
-    // Deleting one leg of a transfer alone would leave an orphan.
     await prisma.storeVoucherHeader.deleteMany({
       where: { transferRef: header.transferRef, status: "DRAFT" },
     });
@@ -124,11 +106,6 @@ export async function deleteDraftVoucher(txNo: string) {
   return { deleted: txNo };
 }
 
-/**
- * Fills in a cost for every line. Inbound lines fall back to the product's
- * default cost; outbound lines are quoted at the store's current average cost,
- * which posting will re-read and confirm.
- */
 async function resolveLineCosts(
   tx: Tx,
   lines: Array<{ productId: number; qty: number; unitCost?: number }>,

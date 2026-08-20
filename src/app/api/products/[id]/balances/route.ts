@@ -2,11 +2,6 @@ import { handleError, ok, toNumber } from "@/lib/api";
 import { NotFoundError, ValidationError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 
-/**
- * Per-warehouse stock for one product. Every warehouse is returned, including
- * those with no balance row yet, so the UI can offer "Add stock" against an
- * empty store without a special case.
- */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;

@@ -30,14 +30,12 @@ export class ValidationError extends AppError {
   }
 }
 
-/** Raised when a posting would drive a store balance below zero. */
 export class InsufficientStockError extends AppError {
   constructor(message: string, details?: unknown) {
     super("INSUFFICIENT_STOCK", message, 409, details);
   }
 }
 
-/** Raised on an illegal document transition, e.g. posting a posted voucher. */
 export class InvalidStateError extends AppError {
   constructor(message: string) {
     super("INVALID_STATE", message, 409);

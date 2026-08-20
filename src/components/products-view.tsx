@@ -18,7 +18,6 @@ export function ProductsView() {
   async function handleDone(text: string) {
     setDialog(null);
     setMessage(text);
-    // Balances, product totals and the ledger all shift when a voucher posts.
     await mutate(
       (key) =>
         typeof key === "string" &&

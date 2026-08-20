@@ -65,7 +65,6 @@ export type Movement = {
   createdAt: string;
 };
 
-/** Surfaces the API's { error: { code, message } } shape as a throwable. */
 export class ApiError extends Error {
   constructor(
     message: string,

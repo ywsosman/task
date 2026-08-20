@@ -18,17 +18,26 @@ type BalanceSnapshot = {
   avgCost: Prisma.Decimal;
 };
 
+const POSTING_TIMEOUT_MS = 20_000;
+
+const OUTBOUND_LEG_FIRST: Prisma.StoreVoucherHeaderOrderByWithRelationInput = { type: "desc" };
+
 const balanceKey = (productId: number, storeId: number): BalanceKey =>
   `${productId}:${storeId}`;
 
-/**
- * Posts a voucher. This is the only operation that touches stock.
- *
- * Everything runs inside a single interactive transaction: if any line fails,
- * no balance, ledger row or status change survives. When the voucher belongs to
- * a transfer, both legs are posted here together, which is what guarantees the
- * two warehouses move as one atomic unit.
- */
+const weightedAverage = (
+  currentQty: number,
+  currentCost: Prisma.Decimal,
+  incomingQty: number,
+  incomingCost: Prisma.Decimal,
+) =>
+  currentQty > 0
+    ? currentCost
+        .mul(currentQty)
+        .add(incomingCost.mul(incomingQty))
+        .div(currentQty + incomingQty)
+    : incomingCost;
+
 export async function postVoucher(txNo: string, actor: string = SYSTEM_USER) {
   return prisma.$transaction(
     async (tx) => {
@@ -44,9 +53,7 @@ export async function postVoucher(txNo: string, actor: string = SYSTEM_USER) {
         ? await tx.storeVoucherHeader.findMany({
             where: { transferRef: header.transferRef },
             include: { details: true, store: true },
-            // Post the outbound leg first so the inbound leg can be valued at
-            // the cost the goods actually left the source store with.
-            orderBy: { type: "desc" },
+            orderBy: OUTBOUND_LEG_FIRST,
           })
         : [header];
 
@@ -59,32 +66,22 @@ export async function postVoucher(txNo: string, actor: string = SYSTEM_USER) {
         }
       }
 
-      const balances = await lockBalances(tx, legs);
-
-      // Carries the outbound cost of a transfer across to its inbound leg.
-      const transferCost = new Map<number, Prisma.Decimal>();
+      const balances = await lockBalancesInStableOrder(tx, legs);
+      const outboundCostByProduct = new Map<number, Prisma.Decimal>();
       const posted: string[] = [];
 
       for (const leg of legs) {
-        await applyLeg(tx, leg, balances, transferCost, actor);
+        await applyLeg(tx, leg, balances, outboundCostByProduct, actor);
         posted.push(leg.txNo);
       }
 
       return { posted, transferRef: header.transferRef };
     },
-    { timeout: 20_000 },
+    { timeout: POSTING_TIMEOUT_MS },
   );
 }
 
-/**
- * Takes row locks on every balance the posting will touch, in a stable order.
- *
- * Locking up front serves two purposes: the average-cost calculation can then
- * read a snapshot that nobody else can change mid-transaction, and the fixed
- * ordering keeps two concurrent transfers between the same stores from
- * deadlocking against each other.
- */
-async function lockBalances(tx: Tx, legs: HeaderWithDetails[]) {
+async function lockBalancesInStableOrder(tx: Tx, legs: HeaderWithDetails[]) {
   const keys = new Map<BalanceKey, { productId: number; storeId: number }>();
   for (const leg of legs) {
     for (const line of leg.details) {
@@ -101,16 +98,13 @@ async function lockBalances(tx: Tx, legs: HeaderWithDetails[]) {
 
   const snapshots = new Map<BalanceKey, BalanceSnapshot>();
   for (const { productId, storeId } of ordered) {
-    // ON CONFLICT DO NOTHING rather than an upsert, so two concurrent postings
-    // racing to create the same balance row cannot collide on the unique index.
     await tx.$executeRaw`
       INSERT INTO "StockBalance" ("productId", "storeId", "qty", "avgCost", "updatedAt")
       VALUES (${productId}, ${storeId}, 0, 0, NOW())
       ON CONFLICT ("productId", "storeId") DO NOTHING
     `;
 
-    // The driver returns numeric columns as strings, hence the normalising below.
-    const rows = await tx.$queryRaw<
+    const [row] = await tx.$queryRaw<
       Array<{ qty: number | string; avgCost: string | number }>
     >`
       SELECT "productId", "storeId", "qty", "avgCost"
@@ -119,7 +113,6 @@ async function lockBalances(tx: Tx, legs: HeaderWithDetails[]) {
       FOR UPDATE
     `;
 
-    const row = rows[0];
     snapshots.set(balanceKey(productId, storeId), {
       productId,
       storeId,
@@ -135,35 +128,25 @@ async function applyLeg(
   tx: Tx,
   leg: HeaderWithDetails,
   balances: Map<BalanceKey, BalanceSnapshot>,
-  transferCost: Map<number, Prisma.Decimal>,
+  outboundCostByProduct: Map<number, Prisma.Decimal>,
   actor: string,
 ) {
   const isInbound = leg.type === VOUCHER_TYPE.IN;
   const productDelta = new Map<number, number>();
 
   for (const line of leg.details) {
-    const key = balanceKey(line.productId, leg.storeId);
-    const balance = balances.get(key)!;
+    const balance = balances.get(balanceKey(line.productId, leg.storeId))!;
+    const lineCost = new Prisma.Decimal(line.unitCost.toString());
 
     const effectiveCost = isInbound
-      ? // A transfer's inbound leg inherits the source store's cost so that
-        // inventory value travels with the goods.
-        (transferCost.get(line.productId) ?? new Prisma.Decimal(line.unitCost.toString()))
+      ? (outboundCostByProduct.get(line.productId) ?? lineCost)
       : balance.qty > 0
         ? balance.avgCost
-        : new Prisma.Decimal(line.unitCost.toString());
+        : lineCost;
 
     if (isInbound) {
       const newQty = balance.qty + line.qty;
-      // Weighted moving average: existing value plus incoming value, spread
-      // over the new quantity.
-      const newAvgCost =
-        balance.qty > 0
-          ? balance.avgCost
-              .mul(balance.qty)
-              .add(effectiveCost.mul(line.qty))
-              .div(newQty)
-          : effectiveCost;
+      const newAvgCost = weightedAverage(balance.qty, balance.avgCost, line.qty, effectiveCost);
 
       await tx.stockBalance.update({
         where: { productId_storeId: { productId: line.productId, storeId: leg.storeId } },
@@ -173,10 +156,7 @@ async function applyLeg(
       balance.qty = newQty;
       balance.avgCost = newAvgCost;
     } else {
-      // Guarded update: the quantity condition lives in the WHERE clause, so
-      // the check and the write are a single statement and stock can never be
-      // driven below zero.
-      const result = await tx.stockBalance.updateMany({
+      const decremented = await tx.stockBalance.updateMany({
         where: {
           productId: line.productId,
           storeId: leg.storeId,
@@ -185,18 +165,12 @@ async function applyLeg(
         data: { qty: { decrement: line.qty } },
       });
 
-      if (result.count === 0) {
-        const product = await tx.product.findUnique({ where: { id: line.productId } });
-        throw new InsufficientStockError(
-          `Insufficient stock for ${product?.sku ?? `product ${line.productId}`} in ${leg.store.name}: ` +
-            `on hand ${balance.qty}, requested ${line.qty}.`,
-          { productId: line.productId, storeId: leg.storeId, available: balance.qty, requested: line.qty },
-        );
+      if (decremented.count === 0) {
+        throw await insufficientStock(tx, leg, line.productId, balance.qty, line.qty);
       }
 
-      // Issuing at average cost leaves the average itself unchanged.
       balance.qty -= line.qty;
-      transferCost.set(line.productId, effectiveCost);
+      outboundCostByProduct.set(line.productId, effectiveCost);
     }
 
     const signedQty = isInbound ? line.qty : -line.qty;
@@ -233,4 +207,19 @@ async function applyLeg(
     where: { txNo: leg.txNo },
     data: { status: "POSTED", postedUid: actor, postedDate: new Date() },
   });
+}
+
+async function insufficientStock(
+  tx: Tx,
+  leg: HeaderWithDetails,
+  productId: number,
+  available: number,
+  requested: number,
+) {
+  const product = await tx.product.findUnique({ where: { id: productId } });
+  return new InsufficientStockError(
+    `Insufficient stock for ${product?.sku ?? `product ${productId}`} in ${leg.store.name}: ` +
+      `on hand ${available}, requested ${requested}.`,
+    { productId, storeId: leg.storeId, available, requested },
+  );
 }

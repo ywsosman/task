@@ -18,10 +18,6 @@ const titles: Record<StockAction, string> = {
   TRANSFER: "Transfer Stock",
 };
 
-/**
- * One dialog drives all three stock operations. Each submission creates a
- * voucher; "Save and Post" then posts it, which is the step that moves stock.
- */
 export function StockDialog({
   target,
   warehouses,

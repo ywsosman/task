@@ -1,8 +1,6 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/generated/prisma/client";
 
-// Next.js dev mode hot-reloads modules, which would otherwise create a new
-// connection pool on every reload until the database refuses connections.
 const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;
 };

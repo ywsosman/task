@@ -41,8 +41,6 @@ export function VouchersView() {
 
   const postVoucher = (voucher: Voucher) =>
     run(voucher.txNo, async () => {
-      // Posting either leg of a transfer posts both, so route through the
-      // transfer endpoint when the voucher belongs to one.
       const path = voucher.transferRef
         ? `/api/transfers/${voucher.transferRef}/post`
         : `/api/vouchers/${voucher.txNo}/post`;

@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { AppError } from "./errors";
 
+const PRISMA_UNIQUE_VIOLATION = "P2002";
+const PRISMA_FOREIGN_KEY_VIOLATION = "P2003";
+const PRISMA_TRANSACTION_CONFLICT = "P2034";
+
 export function ok<T>(data: T, status = 200) {
   return NextResponse.json(data, { status });
 }
@@ -10,10 +14,6 @@ export function created<T>(data: T) {
   return NextResponse.json(data, { status: 201 });
 }
 
-/**
- * Every route funnels failures through here so the client always sees
- * { error: { code, message, details? } }.
- */
 export function handleError(error: unknown) {
   if (error instanceof AppError) {
     return NextResponse.json(
@@ -38,23 +38,21 @@ export function handleError(error: unknown) {
     );
   }
 
-  if (isPrismaError(error, "P2002")) {
+  if (isPrismaError(error, PRISMA_UNIQUE_VIOLATION)) {
     return NextResponse.json(
       { error: { code: "CONFLICT", message: "A record with that unique value already exists." } },
       { status: 409 },
     );
   }
 
-  if (isPrismaError(error, "P2003")) {
+  if (isPrismaError(error, PRISMA_FOREIGN_KEY_VIOLATION)) {
     return NextResponse.json(
       { error: { code: "VALIDATION_ERROR", message: "Referenced record does not exist." } },
       { status: 400 },
     );
   }
 
-  // Two reciprocal transfers posting at the same time can deadlock; Postgres
-  // aborts one and the client is safe to retry.
-  if (isPrismaError(error, "P2034")) {
+  if (isPrismaError(error, PRISMA_TRANSACTION_CONFLICT)) {
     return NextResponse.json(
       {
         error: {
@@ -82,7 +80,6 @@ function isPrismaError(error: unknown, code: string) {
   );
 }
 
-/** Prisma returns Decimal objects; the UI is easier to write against numbers. */
 export function toNumber(value: unknown): number {
   if (value === null || value === undefined) return 0;
   return Number(value.toString());

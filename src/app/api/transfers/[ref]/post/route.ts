@@ -4,7 +4,6 @@ import { prisma } from "@/lib/prisma";
 import { serializeVoucher } from "@/server/serializers";
 import { postVoucher } from "@/server/posting-service";
 
-/** Posts both legs of a transfer atomically. */
 export async function POST(_request: Request, context: { params: Promise<{ ref: string }> }) {
   try {
     const { ref } = await context.params;

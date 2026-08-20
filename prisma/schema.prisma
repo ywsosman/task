@@ -1,10 +1,3 @@
-// Mini Inventory System - voucher based stock control.
-//
-// Master data : Groups, Units, Products, Warehouses
-// Documents   : StoreVoucherHeader + StoreVoucherDetails (Draft -> Posted)
-// Ledger      : StockMovement (signed qty, source of truth)
-// Cache       : StockBalance (qty per product per store, rebuildable from the ledger)
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -35,19 +28,14 @@ model Unit {
 }
 
 model Product {
-  id      Int    @id @default(autoincrement())
-  sku     String @unique @db.VarChar(60)
-  nameEn  String @db.VarChar(200)
-  nameAr  String @db.VarChar(200)
-  unitId  Int
-  groupId Int
-
-  /// Default cost suggested when creating an inbound voucher.
-  unitCost Decimal @default(0) @db.Decimal(18, 4)
-
-  /// Cached total across every store. Maintained when a voucher is posted.
-  onHandQty Int @default(0)
-
+  id        Int      @id @default(autoincrement())
+  sku       String   @unique @db.VarChar(60)
+  nameEn    String   @db.VarChar(200)
+  nameAr    String   @db.VarChar(200)
+  unitId    Int
+  groupId   Int
+  unitCost  Decimal  @default(0) @db.Decimal(18, 4)
+  onHandQty Int      @default(0)
   createdAt DateTime @default(now())
 
   unit  Unit  @relation(fields: [unitId], references: [id])
@@ -80,26 +68,18 @@ enum VoucherStatus {
   POSTED
 }
 
-/// Voucher head. TxNo carries the document number, e.g. SVI_0001 / SVO_0001.
-/// A draft has no effect on stock; posting is what writes the ledger.
 model StoreVoucherHeader {
-  txNo    String @id @db.VarChar(20)
-  storeId Int
-
-  /// 1 = IN (SVI), 2 = OUT (SVO). See VOUCHER_TYPE in src/lib/constants.ts
-  type Int
-
-  date   DateTime      @default(now())
-  status VoucherStatus @default(DRAFT)
-
-  /// Set on both legs of a transfer (e.g. SVT_0001) so they can be posted together.
-  transferRef String? @db.VarChar(20)
-
-  note       String?   @db.VarChar(500)
-  insertUid  String    @default("system") @db.VarChar(60)
-  insertDate DateTime  @default(now())
-  postedUid  String?   @db.VarChar(60)
-  postedDate DateTime?
+  txNo        String        @id @db.VarChar(20)
+  storeId     Int
+  type        Int
+  date        DateTime      @default(now())
+  status      VoucherStatus @default(DRAFT)
+  transferRef String?       @db.VarChar(20)
+  note        String?       @db.VarChar(500)
+  insertUid   String        @default("system") @db.VarChar(60)
+  insertDate  DateTime      @default(now())
+  postedUid   String?       @db.VarChar(60)
+  postedDate  DateTime?
 
   store     Warehouse            @relation(fields: [storeId], references: [id])
   details   StoreVoucherDetail[]
@@ -111,7 +91,6 @@ model StoreVoucherHeader {
   @@map("StoreVoucherHeader")
 }
 
-/// Voucher line. Qty is always positive; direction comes from the header type.
 model StoreVoucherDetail {
   id        Int      @id @default(autoincrement())
   txNo      String   @db.VarChar(20)
@@ -129,8 +108,6 @@ model StoreVoucherDetail {
   @@map("StoreVoucherDetails")
 }
 
-/// Immutable ledger, written only when a voucher is posted.
-/// Qty is signed: positive for inbound, negative for outbound.
 model StockMovement {
   txId      Int      @id @default(autoincrement())
   ref       String   @db.VarChar(20)
@@ -149,9 +126,6 @@ model StockMovement {
   @@map("StockMovement")
 }
 
-/// Derived balance per product per store. Equivalent to
-/// SUM(StockMovement.qty) GROUP BY productId, storeId, kept materialised so the
-/// row can be locked to keep stock from going negative under concurrency.
 model StockBalance {
   id        Int      @id @default(autoincrement())
   productId Int
@@ -168,8 +142,6 @@ model StockBalance {
   @@map("StockBalance")
 }
 
-/// Gapless document numbering. The row is locked inside the creating
-/// transaction, so numbers stay sequential per prefix (SVI, SVO, SVT).
 model NumberSequence {
   prefix String @id @db.VarChar(10)
   lastNo Int    @default(0)

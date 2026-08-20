@@ -6,7 +6,6 @@ type VoucherWithRelations = Prisma.StoreVoucherHeaderGetPayload<{
   include: { details: { include: { product: true } }; store: true };
 }>;
 
-/** Flattens a voucher into the shape the UI consumes, with Decimals as numbers. */
 export function serializeVoucher(voucher: VoucherWithRelations) {
   return {
     txNo: voucher.txNo,

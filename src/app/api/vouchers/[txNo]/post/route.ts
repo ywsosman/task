@@ -3,10 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { serializeVoucher } from "@/server/serializers";
 import { postVoucher } from "@/server/posting-service";
 
-/**
- * Posts a draft voucher. If it is one leg of a transfer, both legs are posted
- * inside the same database transaction.
- */
 export async function POST(_request: Request, context: { params: Promise<{ txNo: string }> }) {
   try {
     const { txNo } = await context.params;
